@@ -7,6 +7,8 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material3.*
@@ -106,9 +108,13 @@ fun GmailSyncScreen(
         }
     }
 
-    // Load accounts when screen is displayed
+    // Load accounts when screen is displayed (don't auto-select)
     LaunchedEffect(Unit) {
         googleAccounts = authHelper.getGoogleAccounts()
+        // Don't auto-select - let user choose from picker
+        if (selectedAccount == null) {
+            selectedAccount = null // Explicitly set to null to show picker
+        }
     }
 
     Scaffold(
@@ -123,7 +129,7 @@ fun GmailSyncScreen(
             )
         }
     ) { paddingValues ->
-        Column(
+        LazyColumn(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(paddingValues)
@@ -131,249 +137,252 @@ fun GmailSyncScreen(
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
             // Account Selection
-            Card(
-                modifier = Modifier.fillMaxWidth(),
-                elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
-            ) {
-                Column(
-                    modifier = Modifier.padding(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
+            item {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
                 ) {
-                    Text(
-                        text = "Select Google Account",
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.Bold
-                    )
-
-                    // Refresh button
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.End
+                    Column(
+                        modifier = Modifier.padding(16.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
+                        Text(
+                            text = "Select Google Account",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold
+                        )
+
+                        // Account Dropdown
+                        var expandedAccount by remember { mutableStateOf(false) }
+
+                        // Refresh accounts list
                         TextButton(
                             onClick = {
                                 scope.launch {
                                     googleAccounts = authHelper.getGoogleAccounts()
                                 }
-                            }
+                            },
+                            modifier = Modifier.fillMaxWidth()
                         ) {
-                            Text("Refresh")
+                            Text("Refresh Accounts")
                         }
-                    }
 
-                    if (googleAccounts.isEmpty()) {
-                        Column(
-                            verticalArrangement = Arrangement.spacedBy(8.dp)
-                        ) {
-                            Text(
-                                text = "No Google accounts detected automatically.",
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = MaterialTheme.colorScheme.error
-                            )
-                            Text(
-                                text = "You can manually enter your Gmail address below, or tap Refresh to try again.",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-
-                            // Use Google Account Picker
-                            Button(
-                                onClick = {
-                                    try {
-                                        val pickerIntent = credential.newChooseAccountIntent()
-                                        accountPickerLauncher.launch(pickerIntent)
-                                    } catch (e: Exception) {
-                                        syncError = "Failed to open account picker: ${e.message}"
-                                    }
-                                },
+                        if (googleAccounts.isNotEmpty()) {
+                            ExposedDropdownMenuBox(
+                                expanded = expandedAccount,
+                                onExpandedChange = { expandedAccount = !expandedAccount },
                                 modifier = Modifier.fillMaxWidth()
                             ) {
-                                Text("Choose Google Account")
-                            }
-
-                            HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
-
-                            // Manual account entry (fallback)
-                            var manualAccount by remember { mutableStateOf("") }
-                            Text(
-                                text = "Or enter manually:",
-                                style = MaterialTheme.typography.bodySmall,
-                                modifier = Modifier.padding(top = 8.dp)
-                            )
-                            OutlinedTextField(
-                                value = manualAccount,
-                                onValueChange = { manualAccount = it },
-                                label = { Text("Enter Gmail Address") },
-                                placeholder = { Text("your.email@gmail.com") },
-                                modifier = Modifier.fillMaxWidth(),
-                                singleLine = true
-                            )
-                            Button(
-                                onClick = {
-                                    if (manualAccount.isNotEmpty() && manualAccount.contains("@")) {
-                                        selectedAccount = manualAccount
-                                        authHelper.setSelectedAccount(manualAccount)
-                                        credential.selectedAccountName = manualAccount
-                                        googleAccounts = listOf(Account(manualAccount, "com.google"))
-                                    } else {
-                                        syncError = "Please enter a valid email address"
-                                    }
-                                },
-                                modifier = Modifier.fillMaxWidth(),
-                                enabled = manualAccount.isNotEmpty()
-                            ) {
-                                Text("Use This Account")
-                            }
-                        }
-                    } else {
-                        googleAccounts.forEach { account ->
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Column(modifier = Modifier.weight(1f)) {
-                                    Text(
-                                        text = account.name,
-                                        style = MaterialTheme.typography.bodyLarge
-                                    )
-                                    Text(
-                                        text = account.type,
-                                        style = MaterialTheme.typography.bodySmall,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                                    )
-                                }
-                                RadioButton(
-                                    selected = selectedAccount == account.name,
-                                    onClick = {
-                                        selectedAccount = account.name
-                                        authHelper.setSelectedAccount(account.name)
-                                    }
+                                OutlinedTextField(
+                                    value = selectedAccount ?: "Select an account",
+                                    onValueChange = { },
+                                    readOnly = true,
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .menuAnchor(),
+                                    label = { Text("Google Account") },
+                                    trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expandedAccount) }
                                 )
+                                ExposedDropdownMenu(
+                                    expanded = expandedAccount,
+                                    onDismissRequest = { expandedAccount = false }
+                                ) {
+                                    googleAccounts.forEach { account ->
+                                        DropdownMenuItem(
+                                            text = { Text(account.name) },
+                                            onClick = {
+                                                selectedAccount = account.name
+                                                authHelper.setSelectedAccount(account.name)
+                                                credential.selectedAccountName = account.name
+                                                expandedAccount = false
+                                            }
+                                        )
+                                    }
+                                }
                             }
+                        } else {
+                            Text(
+                                text = "No Google accounts found. Please add a Google account in device settings.",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.error,
+                                modifier = Modifier.padding(vertical = 8.dp)
+                            )
                         }
+
                     }
                 }
             }
 
             // Date Range Selection
-            Card(
-                modifier = Modifier.fillMaxWidth(),
-                elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
-            ) {
-                Column(
-                    modifier = Modifier.padding(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(12.dp)
+            item {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
                 ) {
-                    Text(
-                        text = "Sync Period",
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.Bold
-                    )
-
-                    Text(
-                        text = "Select how many past days/months to sync",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-
-                    // Range Type Selection
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    Column(
+                        modifier = Modifier.padding(16.dp),
+                        verticalArrangement = Arrangement.spacedBy(12.dp)
                     ) {
-                        FilterChip(
-                            selected = selectedRangeType == "days",
-                            onClick = { selectedRangeType = "days" },
-                            label = { Text("Days") },
-                            modifier = Modifier.weight(1f)
+                        Text(
+                            text = "Sync Period",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold
                         )
-                        FilterChip(
-                            selected = selectedRangeType == "months",
-                            onClick = { selectedRangeType = "months" },
-                            label = { Text("Months") },
-                            modifier = Modifier.weight(1f)
+
+                        Text(
+                            text = "Select how many past days/months to sync",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
-                    }
 
-                    // Range Value Selection
-                    val rangeOptions = if (selectedRangeType == "days") {
-                        listOf(7, 15, 30, 60, 90, 180, 365)
-                    } else {
-                        listOf(1, 3, 6, 12, 24)
-                    }
+                        // Range Type Selection Dropdown
+                        var expandedRangeType by remember { mutableStateOf(false) }
+                        val rangeTypeOptions = listOf("Days" to "days", "Months" to "months")
 
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        rangeOptions.forEach { value ->
-                            FilterChip(
-                                selected = selectedRangeValue == value,
-                                onClick = { selectedRangeValue = value },
-                                label = {
-                                    Text(
-                                        if (selectedRangeType == "days") "$value days"
-                                        else "$value ${if (value == 1) "month" else "months"}"
-                                    )
-                                },
-                                modifier = Modifier.weight(1f)
+                        ExposedDropdownMenuBox(
+                            expanded = expandedRangeType,
+                            onExpandedChange = { expandedRangeType = !expandedRangeType },
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            OutlinedTextField(
+                                value = if (selectedRangeType == "days") "Days" else "Months",
+                                onValueChange = { },
+                                readOnly = true,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .menuAnchor(),
+                                label = { Text("Period Type") },
+                                trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expandedRangeType) }
                             )
+                            ExposedDropdownMenu(
+                                expanded = expandedRangeType,
+                                onDismissRequest = { expandedRangeType = false }
+                            ) {
+                                rangeTypeOptions.forEach { (display, value) ->
+                                    DropdownMenuItem(
+                                        text = { Text(display) },
+                                        onClick = {
+                                            selectedRangeType = value
+                                            expandedRangeType = false
+                                            // Reset to first option when type changes
+                                            val newOptions = if (value == "days") {
+                                                listOf(7, 15, 30, 60, 90, 180, 365)
+                                            } else {
+                                                listOf(1, 3, 6, 12, 24)
+                                            }
+                                            if (selectedRangeValue !in newOptions) {
+                                                selectedRangeValue = newOptions.first()
+                                            }
+                                        }
+                                    )
+                                }
+                            }
                         }
-                    }
 
-                    // Display selected range
-                    Text(
-                        text = "Will sync transactions from the past $selectedRangeValue ${if (selectedRangeType == "days") "days" else if (selectedRangeValue == 1) "month" else "months"}",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.primary,
-                        fontWeight = FontWeight.Medium
-                    )
+                        // Range Value Selection Dropdown
+                        var expandedRangeValue by remember { mutableStateOf(false) }
+                        val rangeOptions = if (selectedRangeType == "days") {
+                            listOf(7, 15, 30, 60, 90, 180, 365)
+                        } else {
+                            listOf(1, 3, 6, 12, 24)
+                        }
+
+                        ExposedDropdownMenuBox(
+                            expanded = expandedRangeValue,
+                            onExpandedChange = { expandedRangeValue = !expandedRangeValue },
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            OutlinedTextField(
+                                value = if (selectedRangeType == "days") {
+                                    "$selectedRangeValue days"
+                                } else {
+                                    "$selectedRangeValue ${if (selectedRangeValue == 1) "month" else "months"}"
+                                },
+                                onValueChange = { },
+                                readOnly = true,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .menuAnchor(),
+                                label = { Text("Period Value") },
+                                trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expandedRangeValue) }
+                            )
+                            ExposedDropdownMenu(
+                                expanded = expandedRangeValue,
+                                onDismissRequest = { expandedRangeValue = false }
+                            ) {
+                                rangeOptions.forEach { value ->
+                                    DropdownMenuItem(
+                                        text = {
+                                            Text(
+                                                if (selectedRangeType == "days") "$value days"
+                                                else "$value ${if (value == 1) "month" else "months"}"
+                                            )
+                                        },
+                                        onClick = {
+                                            selectedRangeValue = value
+                                            expandedRangeValue = false
+                                        }
+                                    )
+                                }
+                            }
+                        }
+
+                        // Display selected range
+                        Text(
+                            text = "Will sync transactions from the past $selectedRangeValue ${if (selectedRangeType == "days") "days" else if (selectedRangeValue == 1) "month" else "months"}",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.primary,
+                            fontWeight = FontWeight.Medium
+                        )
+                    }
                 }
             }
 
             // Authentication Status
             if (selectedAccount != null) {
-                Card(
-                    modifier = Modifier.fillMaxWidth(),
-                    colors = CardDefaults.cardColors(
-                        containerColor = MaterialTheme.colorScheme.primaryContainer
-                    )
-                ) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(16.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
+                item {
+                    Card(
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = CardDefaults.cardColors(
+                            containerColor = MaterialTheme.colorScheme.primaryContainer
+                        )
                     ) {
-                        Column {
-                            Text(
-                                text = "Authenticated",
-                                style = MaterialTheme.typography.titleMedium,
-                                fontWeight = FontWeight.Bold
-                            )
-                            Text(
-                                text = selectedAccount ?: "",
-                                style = MaterialTheme.typography.bodyMedium
-                            )
-                        }
-                        TextButton(
-                            onClick = {
-                                authHelper.clearAuthentication()
-                                selectedAccount = null
-                            }
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(16.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Text("Disconnect")
+                            Column {
+                                Text(
+                                    text = "Authenticated",
+                                    style = MaterialTheme.typography.titleMedium,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                Text(
+                                    text = selectedAccount ?: "",
+                                    style = MaterialTheme.typography.bodyMedium
+                                )
+                            }
+                            TextButton(
+                                onClick = {
+                                    authHelper.clearAuthentication()
+                                    selectedAccount = null
+                                }
+                            ) {
+                                Text("Disconnect")
+                            }
                         }
                     }
                 }
             }
 
             // Sync Button
-            Button(
-                onClick = {
-                    if (selectedAccount == null) {
+            item {
+                Button(
+                    onClick = {
+                        if (selectedAccount == null) {
                         syncError = "Please select a Google account first"
                         return@Button
                     }
@@ -392,13 +401,27 @@ fun GmailSyncScreen(
                                 return@launch
                             }
 
-                            // Set account in credential and auth helper BEFORE creating scraper
-                            credential.selectedAccountName = accountToUse
-                            authHelper.setSelectedAccount(accountToUse)
+                            // Set account in auth helper first, then credential
+                            try {
+                                // Save account in auth helper first
+                                authHelper.setSelectedAccount(accountToUse)
+                                android.util.Log.d("GmailSync", "Saved account in auth helper: $accountToUse")
 
-                            // Verify account is set
-                            if (credential.selectedAccountName == null || credential.selectedAccountName!!.isEmpty()) {
-                                syncError = "Failed to set account. Please try selecting the account again."
+                                // Create a fresh credential with the account set
+                                val freshCredential = GoogleAccountCredential.usingOAuth2(
+                                    context,
+                                    listOf(GmailScopes.GMAIL_READONLY)
+                                )
+                                freshCredential.selectedAccountName = accountToUse
+
+                                // Don't verify immediately - GoogleAccountCredential might not reflect it until used
+                                android.util.Log.d("GmailSync", "Set account on credential: $accountToUse")
+
+                                // Update the remembered credential for account picker
+                                credential.selectedAccountName = accountToUse
+                            } catch (e: Exception) {
+                                syncError = "Error setting account: ${e.message}. Account: '$accountToUse'"
+                                android.util.Log.e("GmailSync", "Exception setting account", e)
                                 isSyncing = false
                                 return@launch
                             }
@@ -414,13 +437,18 @@ fun GmailSyncScreen(
                             // Make sure accountToUse is not null/empty at this point
                             if (accountToUse.isBlank()) {
                                 syncError = "Account name is empty. Please select a Google account again."
+                                android.util.Log.e("GmailSync", "Account name is blank before creating scraper")
                                 isSyncing = false
                                 return@launch
                             }
 
+                            android.util.Log.d("GmailSync", "Creating scraper with account: $accountToUse, daysToSync: $daysToSync")
+                            android.util.Log.d("GmailSync", "Creating scraper with account: $accountToUse, daysToSync: $daysToSync")
                             val scraper = GmailTransactionScraper(context)
                             // Pass the account name explicitly - ensure it's not null
                             val transactions = scraper.scrapeTransactions(accountToUse, daysToSync)
+                            android.util.Log.d("GmailSync", "Scraped ${transactions.size} transactions")
+                            android.util.Log.d("GmailSync", "Scraped ${transactions.size} transactions")
 
                             // Insert transactions
                             transactions.forEach { transaction ->
@@ -436,16 +464,32 @@ fun GmailSyncScreen(
                             isSyncing = false
                         } catch (e: UserRecoverableAuthIOException) {
                             // UserRecoverableAuthIOException wraps UserRecoverableAuthException
-                            // We need to extract the intent to show the consent screen
+                            // Extract the intent to show the consent screen
+                            android.util.Log.d("GmailSync", "Caught UserRecoverableAuthIOException - showing consent dialog")
+                            android.util.Log.d("GmailSync", "Exception cause: ${e.cause?.javaClass?.name}")
+
                             val cause = e.cause
-                            if (cause is UserRecoverableAuthException) {
+                            val intentToLaunch = when {
+                                cause is UserRecoverableAuthException -> {
+                                    android.util.Log.d("GmailSync", "Extracting intent from UserRecoverableAuthException")
+                                    cause.intent
+                                }
+                                else -> {
+                                    android.util.Log.w("GmailSync", "Could not extract intent from cause, trying alternative method")
+                                    null
+                                }
+                            }
+
+                            if (intentToLaunch != null) {
                                 syncError = "Please grant Gmail access permission to sync transactions"
-                                accountPickerLauncher.launch(cause.intent)
+                                android.util.Log.d("GmailSync", "Launching consent intent")
+                                accountPickerLauncher.launch(intentToLaunch)
                             } else {
-                                // If we can't get the intent, show a helpful message
+                                // Fallback: Show message and ask user to try again
                                 syncError = "Please grant Gmail access permission.\n\n" +
                                         "The app needs permission to read your Gmail to sync transactions.\n" +
-                                        "Tap 'Sync Now' again to see the permission dialog."
+                                        "You may see a permission dialog - please grant access."
+                                android.util.Log.e("GmailSync", "Could not extract intent from UserRecoverableAuthIOException")
                             }
                             isSyncing = false
                         } catch (e: GooglePlayServicesAvailabilityException) {
@@ -488,7 +532,7 @@ fun GmailSyncScreen(
                             isSyncing = false
                         }
                     }
-                },
+                    },
                 modifier = Modifier.fillMaxWidth(),
                 enabled = !isSyncing && selectedAccount != null
             ) {
@@ -503,47 +547,53 @@ fun GmailSyncScreen(
                     Text("Sync Now")
                 }
             }
+            }
 
             // Sync Status
             syncStatus?.let { status ->
-                Card(
-                    modifier = Modifier.fillMaxWidth(),
-                    colors = CardDefaults.cardColors(
-                        containerColor = MaterialTheme.colorScheme.primaryContainer
-                    )
-                ) {
-                    Text(
-                        text = status,
-                        modifier = Modifier.padding(16.dp),
-                        style = MaterialTheme.typography.bodyMedium
-                    )
+                item {
+                    Card(
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = CardDefaults.cardColors(
+                            containerColor = MaterialTheme.colorScheme.primaryContainer
+                        )
+                    ) {
+                        Text(
+                            text = status,
+                            modifier = Modifier.padding(16.dp),
+                            style = MaterialTheme.typography.bodyMedium
+                        )
+                    }
                 }
             }
 
             // Error Message
             syncError?.let { error ->
-                Card(
-                    modifier = Modifier.fillMaxWidth(),
-                    colors = CardDefaults.cardColors(
-                        containerColor = MaterialTheme.colorScheme.errorContainer
-                    )
-                ) {
-                    Text(
-                        text = error,
-                        modifier = Modifier.padding(16.dp),
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onErrorContainer
-                    )
+                item {
+                    Card(
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = CardDefaults.cardColors(
+                            containerColor = MaterialTheme.colorScheme.errorContainer
+                        )
+                    ) {
+                        Text(
+                            text = error,
+                            modifier = Modifier.padding(16.dp),
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onErrorContainer
+                        )
+                    }
                 }
             }
 
             // Info Card
-            Card(
-                modifier = Modifier.fillMaxWidth(),
-                colors = CardDefaults.cardColors(
-                    containerColor = MaterialTheme.colorScheme.surfaceVariant
-                )
-            ) {
+            item {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.surfaceVariant
+                    )
+                ) {
                 Column(
                     modifier = Modifier.padding(16.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp)
@@ -562,6 +612,7 @@ fun GmailSyncScreen(
                         style = MaterialTheme.typography.bodyMedium
                     )
                 }
+            }
             }
         }
     }

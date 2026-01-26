@@ -11,6 +11,7 @@ import com.google.api.services.gmail.model.MessagePartHeader
 import com.google.android.gms.auth.GoogleAuthException
 import com.google.android.gms.auth.GooglePlayServicesAvailabilityException
 import com.google.android.gms.auth.UserRecoverableAuthException
+import com.google.api.client.googleapis.extensions.android.gms.auth.UserRecoverableAuthIOException
 import com.kishan.expensetracker.data.entity.Transaction
 import com.kishan.expensetracker.data.entity.TransactionSource
 import com.kishan.expensetracker.data.entity.TransactionType
@@ -23,29 +24,44 @@ import kotlin.text.Charsets.UTF_8
 class GmailTransactionScraper(private val context: Context) {
 
     private fun getGmailService(accountName: String?): Gmail {
+        android.util.Log.d("GmailScraper", "getGmailService called with accountName: '$accountName'")
+
         // Get the account name - prioritize passed parameter, then saved account
         val authHelper = com.kishan.expensetracker.auth.GmailAuthHelper(context)
+        val savedAccount = authHelper.getSelectedAccountName()
+        android.util.Log.d("GmailScraper", "Saved account from helper: '$savedAccount'")
+
         val accountToUse = accountName?.takeIf { it.isNotEmpty() && it.isNotBlank() }
-            ?: authHelper.getSelectedAccountName()?.takeIf { it.isNotEmpty() && it.isNotBlank() }
+            ?: savedAccount?.takeIf { it.isNotEmpty() && it.isNotBlank() }
 
         if (accountToUse == null || accountToUse.isEmpty() || accountToUse.isBlank()) {
-            throw IllegalArgumentException("Account name must not be null or empty. Please select a Google account first. Provided: '$accountName'")
+            val error = "Account name must not be null or empty. Provided: '$accountName', Saved: '$savedAccount'"
+            android.util.Log.e("GmailScraper", error)
+            throw IllegalArgumentException(error)
         }
 
-        // Create a fresh credential with the account name set BEFORE building Gmail service
+        android.util.Log.d("GmailScraper", "Using account: '$accountToUse'")
+
+        // Create a FRESH credential - don't reuse from auth helper as it might have stale state
         val credential = GoogleAccountCredential.usingOAuth2(
             context,
             listOf(GmailScopes.GMAIL_READONLY)
         )
 
-        // Set account name explicitly
+        // CRITICAL: Set account name BEFORE any operations
+        // GoogleAccountCredential stores this internally and uses it when getToken() is called
         credential.selectedAccountName = accountToUse
 
-        // Verify it's set
-        if (credential.selectedAccountName == null || credential.selectedAccountName!!.isEmpty()) {
-            throw IllegalStateException("Failed to set account name on credential. Account: '$accountToUse'")
-        }
+        // Verify it was set (even though getter might return null, the setter works)
+        android.util.Log.d("GmailScraper", "Set credential.selectedAccountName to: '$accountToUse'")
+        android.util.Log.d("GmailScraper", "Credential selectedAccountName getter returns: '${credential.selectedAccountName}'")
 
+        // Note: The getter might return null even after setting, but the setter works.
+        // GoogleAccountCredential uses the account name internally when getToken() is called.
+        // If the account doesn't exist or permission is needed, getToken() will throw
+        // UserRecoverableAuthException which we handle in the UI layer.
+
+        android.util.Log.d("GmailScraper", "Gmail service created with account: '$accountToUse'")
         return Gmail.Builder(
             NetHttpTransport(),
             GsonFactory.getDefaultInstance(),
@@ -61,7 +77,11 @@ class GmailTransactionScraper(private val context: Context) {
             val validatedAccountName = accountName?.takeIf { it.isNotEmpty() && it.isNotBlank() }
                 ?: throw IllegalArgumentException("Account name is null or empty. Cannot proceed with Gmail sync.")
 
+            android.util.Log.d("GmailScraper", "Starting scrapeTransactions with account: '$validatedAccountName'")
+
             // Get Gmail service with the account name - this ensures account is set
+            // Note: We don't check AccountManager here because GET_ACCOUNTS permission
+            // is deprecated. GoogleAccountCredential will handle account lookup internally.
             val gmailService = getGmailService(validatedAccountName)
 
             // Calculate date for filtering (Gmail uses YYYY/MM/DD format)
@@ -105,8 +125,21 @@ class GmailTransactionScraper(private val context: Context) {
                     }
                 }
             }
+        } catch (e: UserRecoverableAuthIOException) {
+            // Propagate this exception to UI layer so consent dialog can be shown
+            android.util.Log.d("GmailScraper", "UserRecoverableAuthIOException - needs consent, propagating to UI")
+            throw e
+        } catch (e: UserRecoverableAuthException) {
+            // Propagate this exception to UI layer so consent dialog can be shown
+            android.util.Log.d("GmailScraper", "UserRecoverableAuthException - needs consent, propagating to UI")
+            // Wrap in UserRecoverableAuthIOException for consistency
+            // UserRecoverableAuthIOException constructor takes the underlying exception
+            throw com.google.api.client.googleapis.extensions.android.gms.auth.UserRecoverableAuthIOException(e)
         } catch (e: Exception) {
+            android.util.Log.e("GmailScraper", "Error during Gmail scraping", e)
             e.printStackTrace()
+            // Re-throw other exceptions so UI can handle them
+            throw e
         }
 
         transactions
@@ -118,11 +151,21 @@ class GmailTransactionScraper(private val context: Context) {
             val subject = headers.find { it.name == "Subject" }?.value ?: ""
             val body = extractBody(message.payload)
 
+            // Log email content for pattern analysis (only first 500 chars to avoid spam)
+            val emailPreview = (subject + " " + body).take(500)
+            android.util.Log.d("GmailScraper", "=== Email Pattern Analysis ===")
+            android.util.Log.d("GmailScraper", "Source: $source")
+            android.util.Log.d("GmailScraper", "Subject: $subject")
+            android.util.Log.d("GmailScraper", "Body preview: $emailPreview")
+            android.util.Log.d("GmailScraper", "=============================")
+
             // Parse transaction details from email
             val amount = extractAmount(subject + " " + body)
             val date = extractDate(headers, body)
-            val description = extractDescription(subject + " " + body)
+            val description = extractDescription(subject, body, source)
             val type = determineTransactionType(subject + " " + body, amount)
+
+            android.util.Log.d("GmailScraper", "Extracted - Amount: $amount, Date: $date, Description: $description, Type: $type")
 
             if (amount != null && date != null) {
                 val category = TransactionCategorizer.categorizeTransaction(description)
@@ -233,22 +276,96 @@ class GmailTransactionScraper(private val context: Context) {
         return Date()
     }
 
-    private fun extractDescription(text: String): String {
-        // Extract merchant name or transaction description
-        val patterns = listOf(
-            Regex("""(?:to|at|from)\s+([A-Z][A-Za-z\s]+?)(?:\s+on|\s+for|$)""", RegexOption.IGNORE_CASE),
-            Regex("""merchant[:\s]+([A-Z][A-Za-z\s]+)""", RegexOption.IGNORE_CASE)
-        )
+    private fun extractDescription(subject: String, body: String, source: TransactionSource): String {
+        val fullText = "$subject $body"
 
+        // Bank-specific patterns for extracting merchant/company names
+        val patterns = when (source) {
+            TransactionSource.HDFC_UPI -> listOf(
+                // HDFC UPI patterns
+                Regex("""(?:paid to|to|at)\s+([A-Z][A-Za-z0-9\s&]+?)(?:\s+UPI|\s+on|\s+for|\.|$)""", RegexOption.IGNORE_CASE),
+                Regex("""UPI\s+(?:payment|transaction)\s+(?:to|at)\s+([A-Z][A-Za-z0-9\s&]+?)(?:\s+on|\s+for|\.|$)""", RegexOption.IGNORE_CASE),
+                Regex("""merchant[:\s]+([A-Z][A-Za-z0-9\s&]+?)(?:\s+on|\s+for|\.|$)""", RegexOption.IGNORE_CASE),
+                Regex("""([A-Z][A-Za-z0-9\s&]{3,30}?)\s+UPI""", RegexOption.IGNORE_CASE)
+            )
+            TransactionSource.HDFC_CREDIT_CARD -> listOf(
+                // HDFC Credit Card patterns
+                Regex("""(?:purchase|transaction|payment)\s+(?:at|from)\s+([A-Z][A-Za-z0-9\s&]+?)(?:\s+on|\s+for|\.|$)""", RegexOption.IGNORE_CASE),
+                Regex("""merchant[:\s]+([A-Z][A-Za-z0-9\s&]+?)(?:\s+on|\s+for|\.|$)""", RegexOption.IGNORE_CASE),
+                Regex("""([A-Z][A-Za-z0-9\s&]{3,30}?)\s+(?:card|transaction)""", RegexOption.IGNORE_CASE)
+            )
+            TransactionSource.ICICI_CREDIT_CARD -> listOf(
+                // ICICI Credit Card patterns
+                Regex("""(?:purchase|transaction|payment)\s+(?:at|from)\s+([A-Z][A-Za-z0-9\s&]+?)(?:\s+on|\s+for|\.|$)""", RegexOption.IGNORE_CASE),
+                Regex("""merchant[:\s]+([A-Z][A-Za-z0-9\s&]+?)(?:\s+on|\s+for|\.|$)""", RegexOption.IGNORE_CASE),
+                Regex("""([A-Z][A-Za-z0-9\s&]{3,30}?)\s+(?:card|transaction)""", RegexOption.IGNORE_CASE)
+            )
+            TransactionSource.SBI_UPI -> listOf(
+                // SBI UPI patterns
+                Regex("""(?:paid to|to|at)\s+([A-Z][A-Za-z0-9\s&]+?)(?:\s+UPI|\s+on|\s+for|\.|$)""", RegexOption.IGNORE_CASE),
+                Regex("""UPI\s+(?:payment|transaction)\s+(?:to|at)\s+([A-Z][A-Za-z0-9\s&]+?)(?:\s+on|\s+for|\.|$)""", RegexOption.IGNORE_CASE),
+                Regex("""merchant[:\s]+([A-Z][A-Za-z0-9\s&]+?)(?:\s+on|\s+for|\.|$)""", RegexOption.IGNORE_CASE),
+                Regex("""([A-Z][A-Za-z0-9\s&]{3,30}?)\s+UPI""", RegexOption.IGNORE_CASE)
+            )
+            else -> listOf(
+                // Generic patterns
+                Regex("""(?:to|at|from)\s+([A-Z][A-Za-z0-9\s&]+?)(?:\s+on|\s+for|\.|$)""", RegexOption.IGNORE_CASE),
+                Regex("""merchant[:\s]+([A-Z][A-Za-z0-9\s&]+?)(?:\s+on|\s+for|\.|$)""", RegexOption.IGNORE_CASE)
+            )
+        }
+
+        // Try patterns in order
         for (pattern in patterns) {
-            val match = pattern.find(text)
+            val match = pattern.find(fullText)
             if (match != null) {
-                return match.groupValues[1].trim()
+                val extracted = match.groupValues[1].trim()
+                // Clean up common suffixes/prefixes
+                val cleaned = extracted
+                    .replace(Regex("""\s+(?:UPI|card|transaction|payment|on|for).*$""", RegexOption.IGNORE_CASE), "")
+                    .replace(Regex("""^(?:at|to|from)\s+""", RegexOption.IGNORE_CASE), "")
+                    .trim()
+
+                if (cleaned.length in 3..50) { // Reasonable length
+                    android.util.Log.d("GmailScraper", "Extracted description: '$cleaned' using pattern: ${pattern.pattern}")
+                    return cleaned
+                }
             }
         }
 
-        // Fallback: return first 50 characters
-        return text.take(50).trim()
+        // Fallback: Try to extract from subject line (usually more concise)
+        val subjectWords = subject.split(Regex("""\s+"""))
+            .filter { it.length > 2 && !it.matches(Regex("""\d+""")) } // Remove short words and numbers
+            .filter { !it.equals("UPI", ignoreCase = true) &&
+                      !it.equals("transaction", ignoreCase = true) &&
+                      !it.equals("payment", ignoreCase = true) &&
+                      !it.equals("card", ignoreCase = true) &&
+                      !it.equals("credit", ignoreCase = true) &&
+                      !it.equals("debit", ignoreCase = true) &&
+                      !it.equals("INR", ignoreCase = true) &&
+                      !it.equals("Rs", ignoreCase = true) }
+            .take(5) // Take first 5 meaningful words
+
+        if (subjectWords.isNotEmpty()) {
+            val subjectDesc = subjectWords.joinToString(" ").take(50)
+            android.util.Log.d("GmailScraper", "Using subject words as description: '$subjectDesc'")
+            return subjectDesc
+        }
+
+        // Last fallback: first meaningful words from body (not full body)
+        val bodyWords = body.split(Regex("""\s+"""))
+            .filter { it.length > 3 && !it.matches(Regex("""\d+""")) }
+            .filter { !it.matches(Regex("""^(?:to|at|from|on|for|the|and|or|is|was|are|were)$""", RegexOption.IGNORE_CASE)) }
+            .take(5)
+
+        if (bodyWords.isNotEmpty()) {
+            val bodyDesc = bodyWords.joinToString(" ").take(50)
+            android.util.Log.d("GmailScraper", "Using body words as description: '$bodyDesc'")
+            return bodyDesc
+        }
+
+        // Final fallback: return a generic description
+        android.util.Log.w("GmailScraper", "Could not extract meaningful description, using generic")
+        return "Transaction"
     }
 
     private fun determineTransactionType(text: String, amount: Double?): TransactionType {
