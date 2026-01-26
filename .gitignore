@@ -9,3 +9,8 @@
 .externalNativeBuild
 .cxx
 local.properties
+
+# Documentation files (local setup guides)
+GITHUB_SETUP.md
+GMAIL_SETUP.md
+TROUBLESHOOTING.md
