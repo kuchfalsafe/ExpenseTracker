@@ -4,6 +4,7 @@ import android.app.Activity
 import android.content.Intent
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -11,6 +12,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -34,6 +36,7 @@ import com.kishan.expensetracker.viewmodel.TransactionViewModel
 import com.kishan.expensetracker.viewmodel.TransactionViewModelFactory
 import kotlinx.coroutines.launch
 import java.util.Calendar
+import java.util.Locale
 import android.accounts.Account
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -55,7 +58,11 @@ fun GmailSyncScreen(
     var syncStatus by remember { mutableStateOf<String?>(null) }
     var syncError by remember { mutableStateOf<String?>(null) }
 
-    // Date range selection
+    // Sync mode: "last_time" or "custom"
+    var syncMode by remember { mutableStateOf("last_time") }
+    var lastSyncTimestamp by remember { mutableStateOf<Long?>(authHelper.getLastSyncTimestamp()) }
+
+    // Date range selection (only used when syncMode is "custom")
     var selectedRangeType by remember { mutableStateOf("days") } // "days" or "months"
     var selectedRangeValue by remember { mutableStateOf(30) } // number of days/months
 
@@ -79,19 +86,37 @@ fun GmailSyncScreen(
                 if (isSyncing) {
                     scope.launch {
                         // Retry sync after permission granted
-                        try {
-                            val daysToSync = if (selectedRangeType == "days") {
-                                selectedRangeValue
-                            } else {
-                                selectedRangeValue * 30
-                            }
-                            val scraper = GmailTransactionScraper(context)
-                            val transactions = scraper.scrapeTransactions(accountName, daysToSync)
-                            transactions.forEach { transaction ->
-                                viewModel.insertTransaction(transaction)
-                            }
-                            syncStatus = "Successfully synced ${transactions.size} transactions"
-                            isSyncing = false
+                                try {
+                                    val fromTimestamp = if (syncMode == "last_time") {
+                                        lastSyncTimestamp
+                                    } else {
+                                        null
+                                    }
+                                    val daysToSync = if (syncMode == "custom") {
+                                        if (selectedRangeType == "days") {
+                                            selectedRangeValue
+                                        } else {
+                                            selectedRangeValue * 30
+                                        }
+                                    } else {
+                                        7
+                                    }
+                                    val scraper = GmailTransactionScraper(context)
+                                    val transactions = scraper.scrapeTransactions(accountName, daysToSync, fromTimestamp)
+                                    transactions.forEach { transaction ->
+                                        viewModel.insertTransaction(transaction)
+                                    }
+
+                                    // Save sync timestamp
+                                    val currentTimestamp = System.currentTimeMillis()
+                                    authHelper.setLastSyncTimestamp(currentTimestamp)
+                                    lastSyncTimestamp = currentTimestamp
+
+                                    syncStatus = when (syncMode) {
+                                        "last_time" -> "Successfully synced ${transactions.size} new transactions since last sync"
+                                        else -> "Successfully synced ${transactions.size} transactions"
+                                    }
+                                    isSyncing = false
                         } catch (e: Exception) {
                             syncError = "Sync failed after permission grant: ${e.message}"
                             isSyncing = false
@@ -108,9 +133,10 @@ fun GmailSyncScreen(
         }
     }
 
-    // Load accounts when screen is displayed (don't auto-select)
+    // Load accounts and last sync timestamp when screen is displayed
     LaunchedEffect(Unit) {
         googleAccounts = authHelper.getGoogleAccounts()
+        lastSyncTimestamp = authHelper.getLastSyncTimestamp()
         // Don't auto-select - let user choose from picker
         if (selectedAccount == null) {
             selectedAccount = null // Explicitly set to null to show picker
@@ -124,6 +150,11 @@ fun GmailSyncScreen(
                 navigationIcon = {
                     IconButton(onClick = { navController.popBackStack() }) {
                         Icon(Icons.Default.ArrowBack, contentDescription = "Back")
+                    }
+                },
+                actions = {
+                    IconButton(onClick = { navController.navigate("email_source_settings") }) {
+                        Icon(Icons.Default.Settings, contentDescription = "Email Source Settings")
                     }
                 }
             )
@@ -213,7 +244,80 @@ fun GmailSyncScreen(
                 }
             }
 
-            // Date Range Selection
+            // Last Sync Status
+            item {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.surfaceVariant
+                    )
+                ) {
+                    Column(
+                        modifier = Modifier.padding(16.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Text(
+                            text = "Last Sync",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold
+                        )
+                        lastSyncTimestamp?.let { timestamp ->
+                            val dateFormat = java.text.SimpleDateFormat("MMM dd, yyyy 'at' HH:mm", Locale.getDefault())
+                            Text(
+                                text = dateFormat.format(java.util.Date(timestamp)),
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                        } ?: run {
+                            Text(
+                                text = "Never synced",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                }
+            }
+
+            // Email Source Settings Card
+            item {
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { navController.navigate("email_source_settings") },
+                    elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(16.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "Email Source Settings",
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text(
+                                text = "Configure email addresses and description extraction hints",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        Icon(
+                            Icons.Default.Settings,
+                            contentDescription = "Settings",
+                            modifier = Modifier.size(24.dp)
+                        )
+                    }
+                }
+            }
+
+            // Sync Mode Selection
             item {
                 Card(
                     modifier = Modifier.fillMaxWidth(),
@@ -224,16 +328,80 @@ fun GmailSyncScreen(
                         verticalArrangement = Arrangement.spacedBy(12.dp)
                     ) {
                         Text(
-                            text = "Sync Period",
+                            text = "Sync Mode",
                             style = MaterialTheme.typography.titleMedium,
                             fontWeight = FontWeight.Bold
                         )
 
-                        Text(
-                            text = "Select how many past days/months to sync",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(16.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            RadioButton(
+                                selected = syncMode == "last_time",
+                                onClick = { syncMode = "last_time" }
+                            )
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "Sync from last time",
+                                    style = MaterialTheme.typography.bodyLarge
+                                )
+                                Text(
+                                    text = "Sync only new transactions since last sync",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(16.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            RadioButton(
+                                selected = syncMode == "custom",
+                                onClick = { syncMode = "custom" }
+                            )
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "Custom period",
+                                    style = MaterialTheme.typography.bodyLarge
+                                )
+                                Text(
+                                    text = "Sync transactions from a specific time period",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Date Range Selection (only shown when syncMode is "custom")
+            if (syncMode == "custom") {
+                item {
+                    Card(
+                        modifier = Modifier.fillMaxWidth(),
+                        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(16.dp),
+                            verticalArrangement = Arrangement.spacedBy(12.dp)
+                        ) {
+                            Text(
+                                text = "Sync Period",
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.Bold
+                            )
+
+                            Text(
+                                text = "Select how many past days/months to sync",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
 
                         // Range Type Selection Dropdown
                         var expandedRangeType by remember { mutableStateOf(false) }
@@ -327,13 +495,14 @@ fun GmailSyncScreen(
                             }
                         }
 
-                        // Display selected range
-                        Text(
-                            text = "Will sync transactions from the past $selectedRangeValue ${if (selectedRangeType == "days") "days" else if (selectedRangeValue == 1) "month" else "months"}",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.primary,
-                            fontWeight = FontWeight.Medium
-                        )
+                            // Display selected range
+                            Text(
+                                text = "Will sync transactions from the past $selectedRangeValue ${if (selectedRangeType == "days") "days" else if (selectedRangeValue == 1) "month" else "months"}",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.primary,
+                                fontWeight = FontWeight.Medium
+                            )
+                        }
                     }
                 }
             }
@@ -426,11 +595,21 @@ fun GmailSyncScreen(
                                 return@launch
                             }
 
-                            // Calculate days to sync
-                            val daysToSync = if (selectedRangeType == "days") {
-                                selectedRangeValue
+                            // Determine sync parameters based on mode
+                            val fromTimestamp = if (syncMode == "last_time") {
+                                lastSyncTimestamp
                             } else {
-                                selectedRangeValue * 30 // Approximate months to days
+                                null
+                            }
+
+                            val daysToSync = if (syncMode == "custom") {
+                                if (selectedRangeType == "days") {
+                                    selectedRangeValue
+                                } else {
+                                    selectedRangeValue * 30 // Approximate months to days
+                                }
+                            } else {
+                                7 // Default, but won't be used if fromTimestamp is set
                             }
 
                             // Create scraper and pass the account name explicitly
@@ -442,12 +621,10 @@ fun GmailSyncScreen(
                                 return@launch
                             }
 
-                            android.util.Log.d("GmailSync", "Creating scraper with account: $accountToUse, daysToSync: $daysToSync")
-                            android.util.Log.d("GmailSync", "Creating scraper with account: $accountToUse, daysToSync: $daysToSync")
+                            android.util.Log.d("GmailSync", "Creating scraper with account: $accountToUse, syncMode: $syncMode, fromTimestamp: $fromTimestamp, daysToSync: $daysToSync")
                             val scraper = GmailTransactionScraper(context)
                             // Pass the account name explicitly - ensure it's not null
-                            val transactions = scraper.scrapeTransactions(accountToUse, daysToSync)
-                            android.util.Log.d("GmailSync", "Scraped ${transactions.size} transactions")
+                            val transactions = scraper.scrapeTransactions(accountToUse, daysToSync, fromTimestamp)
                             android.util.Log.d("GmailSync", "Scraped ${transactions.size} transactions")
 
                             // Insert transactions
@@ -455,7 +632,16 @@ fun GmailSyncScreen(
                                 viewModel.insertTransaction(transaction)
                             }
 
-                            syncStatus = "Successfully synced ${transactions.size} transactions from the past $selectedRangeValue ${if (selectedRangeType == "days") "days" else if (selectedRangeValue == 1) "month" else "months"}"
+                            // Save sync timestamp
+                            val currentTimestamp = System.currentTimeMillis()
+                            authHelper.setLastSyncTimestamp(currentTimestamp)
+                            lastSyncTimestamp = currentTimestamp
+
+                            // Update sync status message
+                            syncStatus = when (syncMode) {
+                                "last_time" -> "Successfully synced ${transactions.size} new transactions since last sync"
+                                else -> "Successfully synced ${transactions.size} transactions from the past $selectedRangeValue ${if (selectedRangeType == "days") "days" else if (selectedRangeValue == 1) "month" else "months"}"
+                            }
                             isSyncing = false
                         } catch (e: UserRecoverableAuthException) {
                             // User needs to grant permission - launch intent
@@ -605,10 +791,10 @@ fun GmailSyncScreen(
                     )
                     Text(
                         text = "• Select your Google account\n" +
-                                "• Choose how many past days/months to sync\n" +
+                                "• Choose 'Sync from last time' to get only new transactions, or select a custom period\n" +
                                 "• Tap 'Sync Now' to fetch transactions from Gmail\n" +
                                 "• Transactions from HDFC, ICICI, and SBI will be automatically imported\n" +
-                                "• A daily job will sync new transactions automatically (last 7 days)",
+                                "• A daily job will sync new transactions automatically (from last sync time)",
                         style = MaterialTheme.typography.bodyMedium
                     )
                 }

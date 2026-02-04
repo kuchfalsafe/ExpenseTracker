@@ -69,7 +69,7 @@ class GmailTransactionScraper(private val context: Context) {
         ).setApplicationName("ExpenseTracker").build()
     }
 
-    suspend fun scrapeTransactions(accountName: String?, daysToSync: Int = 7): List<Transaction> = withContext(Dispatchers.IO) {
+    suspend fun scrapeTransactions(accountName: String?, daysToSync: Int = 7, fromTimestamp: Long? = null): List<Transaction> = withContext(Dispatchers.IO) {
         val transactions = mutableListOf<Transaction>()
 
         try {
@@ -77,7 +77,7 @@ class GmailTransactionScraper(private val context: Context) {
             val validatedAccountName = accountName?.takeIf { it.isNotEmpty() && it.isNotBlank() }
                 ?: throw IllegalArgumentException("Account name is null or empty. Cannot proceed with Gmail sync.")
 
-            android.util.Log.d("GmailScraper", "Starting scrapeTransactions with account: '$validatedAccountName'")
+            android.util.Log.d("GmailScraper", "Starting scrapeTransactions with account: '$validatedAccountName', daysToSync: $daysToSync, fromTimestamp: $fromTimestamp")
 
             // Get Gmail service with the account name - this ensures account is set
             // Note: We don't check AccountManager here because GET_ACCOUNTS permission
@@ -86,24 +86,51 @@ class GmailTransactionScraper(private val context: Context) {
 
             // Calculate date for filtering (Gmail uses YYYY/MM/DD format)
             val calendar = Calendar.getInstance()
-            calendar.add(Calendar.DAY_OF_MONTH, -daysToSync)
+            if (fromTimestamp != null) {
+                // Use provided timestamp
+                calendar.timeInMillis = fromTimestamp
+                android.util.Log.d("GmailScraper", "Using provided timestamp: ${java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(calendar.time)}")
+            } else {
+                // Use daysToSync
+                calendar.add(Calendar.DAY_OF_MONTH, -daysToSync)
+                android.util.Log.d("GmailScraper", "Using daysToSync: $daysToSync")
+            }
             val year = calendar.get(Calendar.YEAR)
             val month = calendar.get(Calendar.MONTH) + 1 // Calendar months are 0-based
             val day = calendar.get(Calendar.DAY_OF_MONTH)
             val dateFilter = "after:$year/$month/$day"
 
-            // Search for transaction emails from different sources
-            val hdfcUpiQuery = "(from:noreply@hdfcbank.net OR from:alerts@hdfcbank.net) subject:UPI $dateFilter"
-            val hdfcCreditQuery = "(from:noreply@hdfcbank.net OR from:alerts@hdfcbank.net) subject:credit $dateFilter"
-            val iciciQuery = "from:alerts@icicibank.com subject:transaction $dateFilter"
-            val sbiQuery = "(from:alerts@sbi.co.in OR from:onlinesbi@sbi.co.in) subject:UPI $dateFilter"
+            // Get configured email sources
+            val configHelper = EmailSourceConfigHelper(context)
+            val emailSources = configHelper.getEmailSources()
 
-            val queries = listOf(
-                hdfcUpiQuery to TransactionSource.HDFC_UPI,
-                hdfcCreditQuery to TransactionSource.HDFC_CREDIT_CARD,
-                iciciQuery to TransactionSource.ICICI_CREDIT_CARD,
-                sbiQuery to TransactionSource.SBI_UPI
-            )
+            // Build queries from configured sources
+            val queries = emailSources.map { (source, config) ->
+                // Build "from:" query with all email addresses
+                val fromQuery = if (config.emailAddresses.size == 1) {
+                    "from:${config.emailAddresses[0]}"
+                } else {
+                    config.emailAddresses.joinToString(" OR ") { "from:$it" }.let { "($it)" }
+                }
+
+                // Build subject query with keywords
+                val subjectQuery = if (config.subjectKeywords.isNotEmpty()) {
+                    if (config.subjectKeywords.size == 1) {
+                        "subject:${config.subjectKeywords[0]}"
+                    } else {
+                        config.subjectKeywords.joinToString(" OR ") { "subject:$it" }.let { "($it)" }
+                    }
+                } else {
+                    ""
+                }
+
+                // Combine into final query
+                val query = listOfNotNull(fromQuery, subjectQuery, dateFilter)
+                    .joinToString(" ")
+                    .trim()
+
+                query to source
+            }
 
             for ((query, source) in queries) {
                 val messages = gmailService.users().messages().list("me")
@@ -156,7 +183,8 @@ class GmailTransactionScraper(private val context: Context) {
             android.util.Log.d("GmailScraper", "=== Email Pattern Analysis ===")
             android.util.Log.d("GmailScraper", "Source: $source")
             android.util.Log.d("GmailScraper", "Subject: $subject")
-            android.util.Log.d("GmailScraper", "Body preview: $emailPreview")
+            android.util.Log.d("GmailScraper", "Body preview (first 500 chars): $emailPreview")
+            android.util.Log.d("GmailScraper", "Body length: ${body.length}")
             android.util.Log.d("GmailScraper", "=============================")
 
             // Parse transaction details from email
@@ -187,19 +215,98 @@ class GmailTransactionScraper(private val context: Context) {
     }
 
     private fun extractBody(payload: com.google.api.services.gmail.model.MessagePart): String {
-        var body = ""
+        var plainTextBody = ""
+        var htmlBody = ""
+
         if (payload.body?.data != null) {
-            body = String(Base64.getUrlDecoder().decode(payload.body.data), UTF_8)
+            val decoded = String(Base64.getUrlDecoder().decode(payload.body.data), UTF_8)
+            // Check if it's HTML or plain text
+            if (decoded.trimStart().startsWith("<", ignoreCase = false)) {
+                htmlBody = decoded
+            } else {
+                plainTextBody = decoded
+            }
         } else if (payload.parts != null) {
+            // First pass: collect text/plain and text/html separately
             for (part in payload.parts) {
-                if (part.mimeType == "text/plain" || part.mimeType == "text/html") {
-                    if (part.body?.data != null) {
-                        body += String(Base64.getUrlDecoder().decode(part.body.data), UTF_8)
+                if (part.body?.data != null) {
+                    val decoded = String(Base64.getUrlDecoder().decode(part.body.data), UTF_8)
+                    when (part.mimeType) {
+                        "text/plain" -> {
+                            plainTextBody += decoded
+                        }
+                        "text/html" -> {
+                            htmlBody += decoded
+                        }
+                    }
+                }
+
+                // Recursively check nested parts
+                if (part.parts != null) {
+                    for (nestedPart in part.parts) {
+                        if (nestedPart.body?.data != null) {
+                            val decoded = String(Base64.getUrlDecoder().decode(nestedPart.body.data), UTF_8)
+                            when (nestedPart.mimeType) {
+                                "text/plain" -> {
+                                    plainTextBody += decoded
+                                }
+                                "text/html" -> {
+                                    htmlBody += decoded
+                                }
+                            }
+                        }
                     }
                 }
             }
         }
-        return body
+
+        // Prefer plain text, but if only HTML is available, extract text from HTML
+        return if (plainTextBody.isNotEmpty()) {
+            plainTextBody
+        } else if (htmlBody.isNotEmpty()) {
+            stripHtmlTags(htmlBody)
+        } else {
+            ""
+        }
+    }
+
+    /**
+     * Strip HTML tags and extract plain text from HTML content
+     */
+    private fun stripHtmlTags(html: String): String {
+        var text = html
+
+        // Remove script and style tags with their content (using multiline mode)
+        text = text.replace(Regex("""<script[^>]*>[\s\S]*?</script>""", RegexOption.IGNORE_CASE), "")
+        text = text.replace(Regex("""<style[^>]*>[\s\S]*?</style>""", RegexOption.IGNORE_CASE), "")
+
+        // Replace common HTML entities
+        text = text.replace("&nbsp;", " ")
+        text = text.replace("&amp;", "&")
+        text = text.replace("&lt;", "<")
+        text = text.replace("&gt;", ">")
+        text = text.replace("&quot;", "\"")
+        text = text.replace("&#39;", "'")
+        text = text.replace("&apos;", "'")
+
+        // Remove HTML tags
+        text = text.replace(Regex("""<[^>]+>"""), " ")
+
+        // Decode numeric HTML entities (e.g., &#160;)
+        text = text.replace(Regex("""&#(\d+);""")) { matchResult ->
+            val code = matchResult.groupValues[1].toIntOrNull()
+            if (code != null && code in 0..127) {
+                code.toChar().toString()
+            } else {
+                matchResult.value
+            }
+        }
+
+        // Clean up whitespace
+        text = text.replace(Regex("""\s+"""), " ")
+        text = text.replace(Regex("""\n\s*\n"""), "\n")
+
+        return text.trim()
     }
 
     private fun extractAmount(text: String): Double? {
@@ -278,6 +385,41 @@ class GmailTransactionScraper(private val context: Context) {
 
     private fun extractDescription(subject: String, body: String, source: TransactionSource): String {
         val fullText = "$subject $body"
+        val bodyLower = body.lowercase(Locale.getDefault())
+
+        // First, try user-provided description phrases from email source config (search in body only, not subject)
+        val configHelper = EmailSourceConfigHelper(context)
+        val emailSources = configHelper.getEmailSources()
+        val config = emailSources[source]
+        val phrases = config?.descriptionPhrases?.filter { it.isNotBlank() } ?: emptyList()
+
+        for (phrase in phrases) {
+            if (phrase.isBlank()) continue
+
+            val phraseLower = phrase.lowercase(Locale.getDefault()).trim()
+
+            // Match phrase (not word boundaries, as phrases can contain spaces)
+            // Escape special regex characters in the phrase
+            val escapedPhrase = Regex.escape(phraseLower)
+            val phrasePattern = Regex(escapedPhrase, RegexOption.IGNORE_CASE)
+            val match = phrasePattern.find(bodyLower)
+
+            if (match != null) {
+                val phraseIndex = match.range.last + 1 // Position after the matched phrase
+
+                // Extract text after the phrase from body only
+                val afterPhrase = body.substring(phraseIndex).trim()
+
+                // Extract text until period (full stop) - split on period and take first part
+                val parts = afterPhrase.split(Regex("""\."""), limit = 2)
+                val extracted = parts[0].trim()
+
+                if (extracted.isNotEmpty() && extracted.length in 3..100) {
+                    android.util.Log.d("GmailScraper", "Extracted description using phrase '$phrase' from body: '$extracted'")
+                    return extracted.take(50) // Limit length
+                }
+            }
+        }
 
         // Bank-specific patterns for extracting merchant/company names
         val patterns = when (source) {

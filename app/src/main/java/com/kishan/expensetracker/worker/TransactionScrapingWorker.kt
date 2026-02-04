@@ -39,8 +39,11 @@ class TransactionScrapingWorker(
                 return@withContext Result.success() // Skip if no account selected
             }
 
-            // Scrape transactions from Gmail (last 7 days for daily sync)
-            val transactions = scraper.scrapeTransactions(accountName, daysToSync = 7)
+            // Get last sync timestamp, or use 7 days if never synced
+            val lastSyncTimestamp = authHelper.getLastSyncTimestamp()
+
+            // Scrape transactions from Gmail (from last sync time, or last 7 days if never synced)
+            val transactions = scraper.scrapeTransactions(accountName, daysToSync = 7, fromTimestamp = lastSyncTimestamp)
 
             // Filter out duplicates by checking if transaction already exists
             val existingTransactions = repository.getAllTransactions().first()
@@ -57,6 +60,8 @@ class TransactionScrapingWorker(
 
             if (newTransactions.isNotEmpty()) {
                 repository.insertTransactions(newTransactions)
+                // Update last sync timestamp after successful sync
+                authHelper.setLastSyncTimestamp(System.currentTimeMillis())
             }
 
             Result.success()

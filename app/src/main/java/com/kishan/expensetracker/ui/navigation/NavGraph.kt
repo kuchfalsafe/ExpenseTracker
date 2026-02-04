@@ -31,6 +31,9 @@ fun NavGraph(navController: NavHostController) {
         composable("gmail_sync") {
             GmailSyncScreen(navController = navController)
         }
+        composable("email_source_settings") {
+            EmailSourceSettingsScreen(navController = navController)
+        }
         composable("category_expenses/{category}/{period}") { backStackEntry ->
             val category = backStackEntry.arguments?.getString("category") ?: ""
             val period = backStackEntry.arguments?.getString("period") ?: "daily"

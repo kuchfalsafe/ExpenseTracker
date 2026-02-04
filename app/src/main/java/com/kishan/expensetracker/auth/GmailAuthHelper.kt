@@ -18,6 +18,7 @@ class GmailAuthHelper(private val context: Context) {
 
     companion object {
         private const val PREF_ACCOUNT_NAME = "account_name"
+        private const val PREF_LAST_SYNC_TIMESTAMP = "last_sync_timestamp"
         private const val GMAIL_SCOPE = GmailScopes.GMAIL_READONLY
     }
 
@@ -65,6 +66,21 @@ class GmailAuthHelper(private val context: Context) {
      */
     fun clearAuthentication() {
         prefs.edit().remove(PREF_ACCOUNT_NAME).apply()
+    }
+
+    /**
+     * Save last sync timestamp
+     */
+    fun setLastSyncTimestamp(timestamp: Long) {
+        prefs.edit().putLong(PREF_LAST_SYNC_TIMESTAMP, timestamp).apply()
+    }
+
+    /**
+     * Get last sync timestamp
+     */
+    fun getLastSyncTimestamp(): Long? {
+        val timestamp = prefs.getLong(PREF_LAST_SYNC_TIMESTAMP, 0L)
+        return if (timestamp > 0) timestamp else null
     }
 
     /**
